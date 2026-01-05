@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.idea/
+
+# Output/demo files
+credential.jwt
+
+.DS_Store
+Thumbs.db
+*.log
+
+.env
