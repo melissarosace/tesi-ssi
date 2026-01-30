@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 import time
 import secrets
 import base64
@@ -8,10 +7,14 @@ from typing import Any, Dict
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-app = FastAPI(title="Tesi SSI - Verifier Simulation", version="0.1.1")
+app = FastAPI(title="Tesi SSI - Railway Verifier Simulation", version="0.2.0")
 
 # Issuer atteso (whitelist)
 ISSUER_WHITELIST = {"http://127.0.0.1:8000"}
+
+# Policy del varco (deposito specifico)
+REQUIRED_DEPOT = "DEPOT_AURORA_NORD"
+ALLOWED_ROLES = {"maintenance_technician", "driver", "conductor", "train_manager"}
 
 # nonce -> {"exp": <timestamp>, "used": bool}
 challenge_store: Dict[str, Dict[str, Any]] = {}
@@ -118,12 +121,22 @@ def verify(req: VerifyRequest):
     if cs_id != sub:
         return VerifyResponse(verified=False, reason="Holder mismatch: 'sub' != 'vc.credentialSubject.id'")
 
-    # 5) check claim (use case università: serve matricola)
-    matricola = credential_subject.get("matricola")
-    if not matricola:
-        return VerifyResponse(verified=False, reason="Missing claim: matricola")
+    # 5) check claim (use case deposito ferroviario)
+    staff_id = credential_subject.get("staff_id")
+    depot_id = credential_subject.get("depot_id")
+    role = credential_subject.get("role")
+    training_ok = credential_subject.get("safety_training_valid")
 
-    if not isinstance(matricola, str) or not matricola.isdigit():
-        return VerifyResponse(verified=False, reason="Invalid matricola format")
+    if not staff_id:
+        return VerifyResponse(verified=False, reason="Missing claim: staff_id")
 
-    return VerifyResponse(verified=True, reason="OK: nonce valid + issuer ok + subject ok + claims ok")
+    if depot_id != REQUIRED_DEPOT:
+        return VerifyResponse(verified=False, reason=f"Wrong depot_id: {depot_id}")
+
+    if role not in ALLOWED_ROLES:
+        return VerifyResponse(verified=False, reason=f"Role not allowed: {role}")
+
+    if training_ok is not True:
+        return VerifyResponse(verified=False, reason="Safety training not valid")
+
+    return VerifyResponse(verified=True, reason="OK: nonce valid + issuer ok + subject ok + depot policy ok")

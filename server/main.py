@@ -9,8 +9,9 @@ from typing import Any, Dict, Optional, List
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Tesi SSI - Issuer Simulation", version="0.3.0")
+app = FastAPI(title="Tesi SSI - Railway Issuer Simulation", version="0.4.0")
 
+# Issuer identifier (demo/local)
 ISSUER_ID = "http://127.0.0.1:8000"
 
 token_store: Dict[str, Dict[str, Any]] = {}
@@ -80,7 +81,8 @@ class ProofObj(BaseModel):
 
 class CredentialRequest(BaseModel):
     format: str = "jwt_vc_json"
-    types: List[str] = Field(default_factory=lambda: ["VerifiableCredential", "MyCredential"])
+    # Default coerente con use case ferroviario (accesso deposito)
+    types: List[str] = Field(default_factory=lambda: ["VerifiableCredential", "RailDepotAccessCredential"])
     proof: ProofObj
 
 
@@ -162,7 +164,7 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
     if isinstance(exp, (int, float)) and tnow >= int(exp):
         raise HTTPException(status_code=400, detail="proof JWT expired")
 
-    # Build VC (as JWT, unsigned)
+    # Build VC (as JWT, unsigned) - Use case: Accesso deposito ferroviario (wallet smartphone)
     vc = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
         "type": req.types,
@@ -170,9 +172,12 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
         "issuanceDate": now_iso(),
         "credentialSubject": {
             "id": iss,
-            "name": "Melissa",
-            "matricola": "123456",
-            "ruolo": "Studentessa",
+            "staff_id": "CLC-FL-000742",
+            "fullName": "Melissa Rosace",
+            "company": "FerroLink S.p.A.",
+            "role": "train_manager",
+            "depot_id": "DEPOT_AURORA_NORD",
+            "safety_training_valid": True,
         },
     }
 

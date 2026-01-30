@@ -3,10 +3,9 @@ import json
 import base64
 import httpx
 
-ISSUER_URL = "http://127.0.0.1:8000"     # server issuer
-VERIFIER_URL = "http://127.0.0.1:8001"   # server verifier
-CLIENT_ID = "did:key:holder-melissa"
-
+ISSUER_URL = "http://127.0.0.1:8000"
+VERIFIER_URL = "http://127.0.0.1:8001"
+CLIENT_ID = "did:key:holder-melissa-rosace"
 
 def b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -21,7 +20,7 @@ def jwt_encode_none(payload: dict, headers: dict) -> str:
 
 def main():
     # 1) /token (ISSUER)
-    token_req = {"client_id": CLIENT_ID, "scope": "openid", "grant_type": "client_credentials"}
+    token_req = {"client_id": CLIENT_ID, "scope": "openid vc", "grant_type": "client_credentials"}
     r = httpx.post(f"{ISSUER_URL}/token", json=token_req, timeout=10)
     r.raise_for_status()
     token_data = r.json()
@@ -45,7 +44,7 @@ def main():
     # 3) /credential (ISSUER)
     cred_req = {
         "format": "jwt_vc_json",
-        "types": ["VerifiableCredential", "MyCredential"],
+        "types": ["VerifiableCredential", "RailDepotAccessCredential"],
         "proof": {"proof_type": "jwt", "jwt": proof_jwt},
     }
     headers = {"Authorization": f"Bearer {access_token}"}
