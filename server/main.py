@@ -81,7 +81,6 @@ class ProofObj(BaseModel):
 
 class CredentialRequest(BaseModel):
     format: str = "jwt_vc_json"
-    # Default coerente con use case ferroviario (accesso deposito)
     types: List[str] = Field(default_factory=lambda: ["VerifiableCredential", "RailDepotAccessCredential"])
     proof: ProofObj
 
@@ -164,7 +163,6 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
     if isinstance(exp, (int, float)) and tnow >= int(exp):
         raise HTTPException(status_code=400, detail="proof JWT expired")
 
-    # Build VC (as JWT, unsigned) - Use case: Accesso deposito ferroviario (wallet smartphone)
     vc = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
         "type": req.types,

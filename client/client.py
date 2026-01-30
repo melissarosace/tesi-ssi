@@ -19,7 +19,6 @@ def jwt_encode_none(payload: dict, headers: dict) -> str:
 
 
 def main():
-    # 1) /token (ISSUER)
     token_req = {"client_id": CLIENT_ID, "scope": "openid vc", "grant_type": "client_credentials"}
     r = httpx.post(f"{ISSUER_URL}/token", json=token_req, timeout=10)
     r.raise_for_status()
@@ -29,7 +28,6 @@ def main():
     c_nonce = token_data["c_nonce"]
     print("TOKEN OK:", access_token[:12] + "...", "nonce:", c_nonce)
 
-    # 2) proof jwt (holder -> issuer)
     now = int(time.time())
     proof_payload = {
         "iss": CLIENT_ID,
@@ -41,7 +39,6 @@ def main():
     proof_headers = {"typ": "openid4vci-proof+jwt"}
     proof_jwt = jwt_encode_none(proof_payload, proof_headers)
 
-    # 3) /credential (ISSUER)
     cred_req = {
         "format": "jwt_vc_json",
         "types": ["VerifiableCredential", "RailDepotAccessCredential"],
@@ -55,19 +52,16 @@ def main():
     credential_jwt = resp["credential"]
     print("CREDENTIAL OK, jwt prefix:", credential_jwt[:30] + "...")
 
-    # (opzionale) salva la VC
     with open("credential.jwt", "w", encoding="utf-8") as f:
         f.write(credential_jwt)
     print("Saved credential.jwt")
 
-    # 4) /challenge (VERIFIER)
     c = httpx.post(f"{VERIFIER_URL}/challenge", timeout=10)
     c.raise_for_status()
     challenge = c.json()
     challenge_nonce = challenge["nonce"]
     print("CHALLENGE OK:", challenge_nonce[:12] + "...")
 
-    # 5) /verify (VERIFIER)
     verify_req = {"nonce": challenge_nonce, "credential": credential_jwt}
     v = httpx.post(f"{VERIFIER_URL}/verify", json=verify_req, timeout=10)
     v.raise_for_status()

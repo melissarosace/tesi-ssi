@@ -9,14 +9,12 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Tesi SSI - Railway Verifier Simulation", version="0.2.0")
 
-# Issuer atteso (whitelist)
 ISSUER_WHITELIST = {"http://127.0.0.1:8000"}
 
 # Policy del varco (deposito specifico)
 REQUIRED_DEPOT = "DEPOT_AURORA_NORD"
 ALLOWED_ROLES = {"maintenance_technician", "driver", "conductor", "train_manager"}
 
-# nonce -> {"exp": <timestamp>, "used": bool}
 challenge_store: Dict[str, Dict[str, Any]] = {}
 
 
@@ -65,7 +63,6 @@ def challenge():
 def verify(req: VerifyRequest):
     tnow = now_ts()
 
-    # 1) check nonce/challenge
     entry = challenge_store.get(req.nonce)
     if not entry:
         return VerifyResponse(verified=False, reason="Nonce not found")
@@ -76,11 +73,9 @@ def verify(req: VerifyRequest):
     if tnow >= int(entry["exp"]):
         return VerifyResponse(verified=False, reason="Nonce expired")
 
-    # consume nonce subito (anti-replay)
     entry["used"] = True
     entry["exp"] = tnow - 1
 
-    # 2) decode VC JWT (demo: no signature verify)
     try:
         decoded = jwt_decode_no_verify(req.credential)
     except Exception as e:
@@ -88,7 +83,6 @@ def verify(req: VerifyRequest):
 
     payload = decoded["payload"]
 
-    # 3) checks su payload VC
     iss = payload.get("iss")
     exp = payload.get("exp")
 
@@ -101,7 +95,6 @@ def verify(req: VerifyRequest):
     if isinstance(exp, (int, float)) and tnow >= int(exp):
         return VerifyResponse(verified=False, reason="VC expired (exp)")
 
-    # 4) controllo subject/holder: sub e vc.credentialSubject.id
     sub = payload.get("sub")
     if not sub:
         return VerifyResponse(verified=False, reason="Missing 'sub' (holder) in VC JWT payload")
@@ -121,7 +114,6 @@ def verify(req: VerifyRequest):
     if cs_id != sub:
         return VerifyResponse(verified=False, reason="Holder mismatch: 'sub' != 'vc.credentialSubject.id'")
 
-    # 5) check claim (use case deposito ferroviario)
     staff_id = credential_subject.get("staff_id")
     depot_id = credential_subject.get("depot_id")
     role = credential_subject.get("role")
