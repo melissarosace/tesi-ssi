@@ -2,17 +2,28 @@ from datetime import datetime, timezone
 from uuid import uuid4
 import time
 import secrets
-import base64
-import json
 from typing import Any, Dict, Optional, List
+from pathlib import Path
 
+import jwt
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Tesi SSI - Railway Issuer Simulation", version="0.4.0")
+app = FastAPI(title="Tesi SSI - Railway Issuer Simulation", version="0.5.1")
 
-# Issuer identifier (demo/local)
 ISSUER_ID = "http://127.0.0.1:8000"
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+ISSUER_PRIVATE_KEY_PATH = BASE_DIR / "keys" / "issuer_private.pem"
+ISSUER_PRIVATE_KEY = ISSUER_PRIVATE_KEY_PATH.read_text(encoding="utf-8")
+ISSUER_KID = "issuer-key-1"
+
+HOLDER_PUBLIC_KEY_PATH = BASE_DIR / "keys" / "holder_public.pem"
+HOLDER_PUBLIC_KEY = HOLDER_PUBLIC_KEY_PATH.read_text(encoding="utf-8")
+EXPECTED_HOLDER_KID = "holder-key-1"
+EXPECTED_PROOF_TYP = "openid4vci-proof+jwt"
+EXPECTED_PROOF_ALG = "RS256"
 
 token_store: Dict[str, Dict[str, Any]] = {}
 
@@ -25,39 +36,47 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
-
-
-def b64url_decode(s: str) -> bytes:
-    padding = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + padding)
-
-
-def jwt_encode_none(payload: Dict[str, Any], headers: Optional[Dict[str, Any]] = None) -> str:
-    if headers is None:
-        headers = {}
-    headers = {**headers, "alg": "none"}
-    header_b64 = b64url_encode(json.dumps(headers, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    payload_b64 = b64url_encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    return f"{header_b64}.{payload_b64}."
-
-
-def jwt_decode_no_verify(token: str) -> Dict[str, Dict[str, Any]]:
-    parts = token.split(".")
-    if len(parts) < 2:
-        raise ValueError("Invalid JWT format")
-    header_json = b64url_decode(parts[0]).decode("utf-8")
-    payload_json = b64url_decode(parts[1]).decode("utf-8")
-    return {"header": json.loads(header_json), "payload": json.loads(payload_json)}
-
-
 def parse_bearer(auth: Optional[str]) -> Optional[str]:
     if not auth:
         return None
     if not auth.lower().startswith("bearer "):
         return None
     return auth.split(" ", 1)[1].strip()
+
+
+def jwt_sign_rs256(payload: Dict[str, Any], *, typ: str) -> str:
+    headers = {"typ": typ, "alg": "RS256", "kid": ISSUER_KID}
+    token = jwt.encode(payload, ISSUER_PRIVATE_KEY, algorithm="RS256", headers=headers)
+    return token if isinstance(token, str) else token.decode("utf-8")
+
+
+def verify_holder_proof_rs256(proof_jwt: str) -> Dict[str, Any]:
+    header = jwt.get_unverified_header(proof_jwt)
+
+    typ = header.get("typ")
+    if typ != EXPECTED_PROOF_TYP:
+        raise ValueError(f"Unexpected typ: {typ}")
+
+    alg = header.get("alg")
+    if alg != EXPECTED_PROOF_ALG:
+        raise ValueError(f"Unexpected alg: {alg}")
+
+    kid = header.get("kid")
+    if not kid:
+        raise ValueError("Missing 'kid' in proof JWT header")
+    if kid != EXPECTED_HOLDER_KID:
+        raise ValueError(f"Unexpected kid: {kid}")
+
+    payload = jwt.decode(
+        proof_jwt,
+        HOLDER_PUBLIC_KEY,
+        algorithms=["RS256"],
+        options={
+            "verify_aud": False,
+            "verify_exp": False,
+        },
+    )
+    return payload
 
 
 class TokenRequest(BaseModel):
@@ -124,6 +143,8 @@ def token(req: TokenRequest):
 
 @app.post("/credential", response_model=CredentialResponse)
 def credential(req: CredentialRequest, authorization: Optional[str] = Header(None, alias="Authorization")):
+    tnow = now_ts()
+
     access_token = parse_bearer(authorization)
     if not access_token:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -132,23 +153,39 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
     if not session:
         raise HTTPException(status_code=401, detail="Invalid access_token")
 
-    tnow = now_ts()
-    if tnow >= session["token_exp"]:
+    if tnow >= int(session["token_exp"]):
         raise HTTPException(status_code=401, detail="access_token expired")
 
-    # proof check
-    try:
-        decoded = jwt_decode_no_verify(req.proof.jwt)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid proof JWT: {e}")
+    if req.proof.proof_type != "jwt":
+        raise HTTPException(status_code=400, detail="Unsupported proof_type (expected 'jwt')")
 
-    proof_payload = decoded["payload"]
+    try:
+        proof_payload = verify_holder_proof_rs256(req.proof.jwt)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid proof signature/JWT: {e}")
+
     nonce = proof_payload.get("nonce")
     iss = proof_payload.get("iss")
     aud = proof_payload.get("aud")
     exp = proof_payload.get("exp")
 
-    if tnow >= session["c_nonce_exp"]:
+    if not isinstance(iss, str) or not iss:
+        raise HTTPException(status_code=400, detail="Missing/invalid 'iss' in proof JWT payload")
+
+    if not isinstance(aud, str) or not aud:
+        raise HTTPException(status_code=400, detail="Missing/invalid 'aud' in proof JWT payload")
+    if aud != ISSUER_ID:
+        raise HTTPException(status_code=400, detail="aud mismatch")
+
+    if not isinstance(exp, (int, float)):
+        raise HTTPException(status_code=400, detail="Missing/invalid 'exp' in proof JWT payload")
+    if tnow >= int(exp):
+        raise HTTPException(status_code=400, detail="proof JWT expired")
+
+    if not isinstance(nonce, str) or not nonce:
+        raise HTTPException(status_code=400, detail="Missing/invalid 'nonce' in proof JWT payload")
+
+    if tnow >= int(session["c_nonce_exp"]):
         raise HTTPException(status_code=400, detail="c_nonce expired (request a new token)")
 
     if nonce != session["c_nonce"]:
@@ -156,12 +193,6 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
 
     if iss != session["client_id"]:
         raise HTTPException(status_code=400, detail="iss mismatch")
-
-    if aud is not None and aud != ISSUER_ID:
-        raise HTTPException(status_code=400, detail="aud mismatch")
-
-    if isinstance(exp, (int, float)) and tnow >= int(exp):
-        raise HTTPException(status_code=400, detail="proof JWT expired")
 
     vc = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
@@ -188,12 +219,10 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
         "vc": vc,
     }
 
-    vc_jwt = jwt_encode_none(vc_jwt_payload, headers={"typ": "jwt_vc_json"})
+    vc_jwt = jwt_sign_rs256(vc_jwt_payload, typ="jwt_vc_json")
 
-    # new nonce optional
     new_nonce = secrets.token_urlsafe(32)
     new_nonce_expires_in = 3600
-
     session["c_nonce"] = new_nonce
     session["c_nonce_exp"] = tnow + new_nonce_expires_in
 

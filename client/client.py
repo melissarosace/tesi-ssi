@@ -1,21 +1,26 @@
 import time
-import json
-import base64
+from pathlib import Path
+
 import httpx
+import jwt
 
 ISSUER_URL = "http://127.0.0.1:8000"
 VERIFIER_URL = "http://127.0.0.1:8001"
 CLIENT_ID = "did:key:holder-melissa-rosace"
 
-def b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+BASE_DIR = Path(__file__).resolve().parents[1]
+HOLDER_PRIVATE_KEY_PATH = BASE_DIR / "keys" / "holder_private.pem"
+HOLDER_PRIVATE_KEY = HOLDER_PRIVATE_KEY_PATH.read_text(encoding="utf-8")
+
+HOLDER_KID = "holder-key-1"
 
 
-def jwt_encode_none(payload: dict, headers: dict) -> str:
-    headers = {**headers, "alg": "none"}
-    header_b64 = b64url_encode(json.dumps(headers, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    return f"{header_b64}.{payload_b64}."
+def sign_proof_rs256(payload: dict) -> str:
+    headers = {
+        "typ": "openid4vci-proof+jwt",
+        "kid": HOLDER_KID,
+    }
+    return jwt.encode(payload, HOLDER_PRIVATE_KEY, algorithm="RS256", headers=headers)
 
 
 def main():
@@ -34,10 +39,9 @@ def main():
         "aud": ISSUER_URL,
         "nonce": c_nonce,
         "iat": now,
-        "exp": now + 300,  # +5 min
+        "exp": now + 300,
     }
-    proof_headers = {"typ": "openid4vci-proof+jwt"}
-    proof_jwt = jwt_encode_none(proof_payload, proof_headers)
+    proof_jwt = sign_proof_rs256(proof_payload)
 
     cred_req = {
         "format": "jwt_vc_json",

@@ -1,17 +1,24 @@
 import time
 import secrets
-import base64
-import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+from pathlib import Path
 
+import jwt
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-app = FastAPI(title="Tesi SSI - Railway Verifier Simulation", version="0.2.0")
+app = FastAPI(title="Tesi SSI - Railway Verifier Simulation", version="0.3.1")
 
 ISSUER_WHITELIST = {"http://127.0.0.1:8000"}
 
-# Policy del varco (deposito specifico)
+BASE_DIR = Path(__file__).resolve().parents[1]
+ISSUER_PUBLIC_KEY_PATH = BASE_DIR / "keys" / "issuer_public.pem"
+ISSUER_PUBLIC_KEY = ISSUER_PUBLIC_KEY_PATH.read_text(encoding="utf-8")
+
+EXPECTED_ISSUER_KID = "issuer-key-1"
+EXPECTED_VC_TYP = "jwt_vc_json"
+EXPECTED_VC_ALG = "RS256"
+
 REQUIRED_DEPOT = "DEPOT_AURORA_NORD"
 ALLOWED_ROLES = {"maintenance_technician", "driver", "conductor", "train_manager"}
 
@@ -22,18 +29,8 @@ def now_ts() -> int:
     return int(time.time())
 
 
-def b64url_decode(s: str) -> bytes:
-    padding = "=" * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + padding)
-
-
-def jwt_decode_no_verify(token: str) -> Dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) < 2:
-        raise ValueError("Invalid JWT format")
-    header_json = b64url_decode(parts[0]).decode("utf-8")
-    payload_json = b64url_decode(parts[1]).decode("utf-8")
-    return {"header": json.loads(header_json), "payload": json.loads(payload_json)}
+class ChallengeRequest(BaseModel):
+    expires_in: int = 300
 
 
 class ChallengeResponse(BaseModel):
@@ -43,7 +40,7 @@ class ChallengeResponse(BaseModel):
 
 class VerifyRequest(BaseModel):
     nonce: str
-    credential: str  # VC JWT
+    credential: str
 
 
 class VerifyResponse(BaseModel):
@@ -51,12 +48,46 @@ class VerifyResponse(BaseModel):
     reason: str
 
 
+@app.get("/ping")
+def ping():
+    return {"ok": True, "ts": now_ts()}
+
+
 @app.post("/challenge", response_model=ChallengeResponse)
-def challenge():
-    expires_in = 300  # seconds
+def challenge(body: Optional[ChallengeRequest] = None):
+    expires_in = body.expires_in if body is not None else 300
     nonce = secrets.token_urlsafe(32)
     challenge_store[nonce] = {"exp": now_ts() + expires_in, "used": False}
     return ChallengeResponse(nonce=nonce, expires_in=expires_in)
+
+
+def decode_and_verify_vc_rs256(token: str) -> Dict[str, Any]:
+    header = jwt.get_unverified_header(token)
+
+    alg = header.get("alg")
+    if alg != EXPECTED_VC_ALG:
+        raise ValueError(f"Unexpected alg: {alg}")
+
+    typ = header.get("typ")
+    if typ != EXPECTED_VC_TYP:
+        raise ValueError(f"Unexpected typ: {typ}")
+
+    kid = header.get("kid")
+    if not kid:
+        raise ValueError("Missing 'kid' in VC JWT header")
+    if kid != EXPECTED_ISSUER_KID:
+        raise ValueError(f"Unexpected kid: {kid}")
+
+    payload = jwt.decode(
+        token,
+        ISSUER_PUBLIC_KEY,
+        algorithms=["RS256"],
+        options={
+            "verify_aud": False,
+            "verify_exp": False,
+        },
+    )
+    return payload
 
 
 @app.post("/verify", response_model=VerifyResponse)
@@ -66,10 +97,8 @@ def verify(req: VerifyRequest):
     entry = challenge_store.get(req.nonce)
     if not entry:
         return VerifyResponse(verified=False, reason="Nonce not found")
-
     if entry.get("used"):
         return VerifyResponse(verified=False, reason="Nonce already used")
-
     if tnow >= int(entry["exp"]):
         return VerifyResponse(verified=False, reason="Nonce expired")
 
@@ -77,27 +106,28 @@ def verify(req: VerifyRequest):
     entry["exp"] = tnow - 1
 
     try:
-        decoded = jwt_decode_no_verify(req.credential)
+        payload = decode_and_verify_vc_rs256(req.credential)
     except Exception as e:
-        return VerifyResponse(verified=False, reason=f"Invalid VC JWT: {e}")
-
-    payload = decoded["payload"]
+        return VerifyResponse(verified=False, reason=f"Invalid VC signature/JWT: {e}")
 
     iss = payload.get("iss")
     exp = payload.get("exp")
 
-    if not iss:
-        return VerifyResponse(verified=False, reason="Missing 'iss' in VC JWT payload")
+    if not isinstance(iss, str) or not iss:
+        return VerifyResponse(verified=False, reason="Missing/invalid 'iss' in VC JWT payload")
 
     if iss not in ISSUER_WHITELIST:
         return VerifyResponse(verified=False, reason=f"Issuer not allowed: {iss}")
 
-    if isinstance(exp, (int, float)) and tnow >= int(exp):
+    if not isinstance(exp, (int, float)):
+        return VerifyResponse(verified=False, reason="Missing/invalid 'exp' in VC JWT payload")
+
+    if tnow >= int(exp):
         return VerifyResponse(verified=False, reason="VC expired (exp)")
 
     sub = payload.get("sub")
-    if not sub:
-        return VerifyResponse(verified=False, reason="Missing 'sub' (holder) in VC JWT payload")
+    if not isinstance(sub, str) or not sub:
+        return VerifyResponse(verified=False, reason="Missing/invalid 'sub' (holder) in VC JWT payload")
 
     vc = payload.get("vc")
     if not isinstance(vc, dict):
@@ -108,8 +138,8 @@ def verify(req: VerifyRequest):
         return VerifyResponse(verified=False, reason="Missing or invalid 'vc.credentialSubject' in VC")
 
     cs_id = credential_subject.get("id")
-    if not cs_id:
-        return VerifyResponse(verified=False, reason="Missing 'vc.credentialSubject.id' (holder id)")
+    if not isinstance(cs_id, str) or not cs_id:
+        return VerifyResponse(verified=False, reason="Missing/invalid 'vc.credentialSubject.id' (holder id)")
 
     if cs_id != sub:
         return VerifyResponse(verified=False, reason="Holder mismatch: 'sub' != 'vc.credentialSubject.id'")
@@ -131,4 +161,4 @@ def verify(req: VerifyRequest):
     if training_ok is not True:
         return VerifyResponse(verified=False, reason="Safety training not valid")
 
-    return VerifyResponse(verified=True, reason="OK: nonce valid + issuer ok + subject ok + depot policy ok")
+    return VerifyResponse(verified=True, reason="OK: signature ok + header ok + nonce ok + policy ok")
