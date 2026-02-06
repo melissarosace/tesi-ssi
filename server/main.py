@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 import time
 import secrets
+import json
 from typing import Any, Dict, Optional, List
 from pathlib import Path
 
@@ -9,19 +10,20 @@ import jwt
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Tesi SSI - Railway Issuer Simulation", version="0.5.1")
+app = FastAPI(title="Tesi SSI - Railway Issuer Simulation", version="0.5.3")
 
-ISSUER_ID = "http://127.0.0.1:8000"
+ISSUER_URL = "http://127.0.0.1:8000"
+ISSUER_DID = "did:example:issuer"
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+
+DID_REGISTRY_PATH = BASE_DIR / "did_registry.json"
+DID_REGISTRY: Dict[str, Any] = json.loads(DID_REGISTRY_PATH.read_text(encoding="utf-8"))
 
 ISSUER_PRIVATE_KEY_PATH = BASE_DIR / "keys" / "issuer_private.pem"
 ISSUER_PRIVATE_KEY = ISSUER_PRIVATE_KEY_PATH.read_text(encoding="utf-8")
 ISSUER_KID = "issuer-key-1"
 
-HOLDER_PUBLIC_KEY_PATH = BASE_DIR / "keys" / "holder_public.pem"
-HOLDER_PUBLIC_KEY = HOLDER_PUBLIC_KEY_PATH.read_text(encoding="utf-8")
-EXPECTED_HOLDER_KID = "holder-key-1"
 EXPECTED_PROOF_TYP = "openid4vci-proof+jwt"
 EXPECTED_PROOF_ALG = "RS256"
 
@@ -44,6 +46,31 @@ def parse_bearer(auth: Optional[str]) -> Optional[str]:
     return auth.split(" ", 1)[1].strip()
 
 
+def resolve_public_key_pem(did: str, kid: str) -> str:
+    entry = DID_REGISTRY.get(did)
+    if not isinstance(entry, dict):
+        raise ValueError(f"DID not found: {did}")
+
+    keys = entry.get("keys")
+    if not isinstance(keys, dict):
+        raise ValueError(f"Invalid keys for DID: {did}")
+
+    k = keys.get(kid)
+    if not isinstance(k, dict):
+        raise ValueError(f"kid not found for DID: {did}: {kid}")
+
+    pem = k.get("publicKeyPem")
+    if isinstance(pem, str) and pem.strip():
+        return pem
+
+    pem_path = k.get("publicKeyPemPath")
+    if isinstance(pem_path, str) and pem_path.strip():
+        p = (BASE_DIR / pem_path).resolve()
+        return p.read_text(encoding="utf-8")
+
+    raise ValueError(f"No public key material for DID={did}, kid={kid}")
+
+
 def jwt_sign_rs256(payload: Dict[str, Any], *, typ: str) -> str:
     headers = {"typ": typ, "alg": "RS256", "kid": ISSUER_KID}
     token = jwt.encode(payload, ISSUER_PRIVATE_KEY, algorithm="RS256", headers=headers)
@@ -62,19 +89,24 @@ def verify_holder_proof_rs256(proof_jwt: str) -> Dict[str, Any]:
         raise ValueError(f"Unexpected alg: {alg}")
 
     kid = header.get("kid")
-    if not kid:
+    if not isinstance(kid, str) or not kid:
         raise ValueError("Missing 'kid' in proof JWT header")
-    if kid != EXPECTED_HOLDER_KID:
-        raise ValueError(f"Unexpected kid: {kid}")
+
+    unverified = jwt.decode(
+        proof_jwt,
+        options={"verify_signature": False, "verify_aud": False, "verify_exp": False},
+    )
+    iss = unverified.get("iss")
+    if not isinstance(iss, str) or not iss:
+        raise ValueError("Missing/invalid 'iss' in proof JWT payload")
+
+    holder_public_key = resolve_public_key_pem(iss, kid)
 
     payload = jwt.decode(
         proof_jwt,
-        HOLDER_PUBLIC_KEY,
+        holder_public_key,
         algorithms=["RS256"],
-        options={
-            "verify_aud": False,
-            "verify_exp": False,
-        },
+        options={"verify_aud": False, "verify_exp": False},
     )
     return payload
 
@@ -174,7 +206,7 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
 
     if not isinstance(aud, str) or not aud:
         raise HTTPException(status_code=400, detail="Missing/invalid 'aud' in proof JWT payload")
-    if aud != ISSUER_ID:
+    if aud != ISSUER_URL:
         raise HTTPException(status_code=400, detail="aud mismatch")
 
     if not isinstance(exp, (int, float)):
@@ -197,7 +229,7 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
     vc = {
         "@context": ["https://www.w3.org/2018/credentials/v1"],
         "type": req.types,
-        "issuer": ISSUER_ID,
+        "issuer": ISSUER_DID,
         "issuanceDate": now_iso(),
         "credentialSubject": {
             "id": iss,
@@ -211,7 +243,7 @@ def credential(req: CredentialRequest, authorization: Optional[str] = Header(Non
     }
 
     vc_jwt_payload = {
-        "iss": ISSUER_ID,
+        "iss": ISSUER_DID,
         "sub": iss,
         "iat": tnow,
         "exp": tnow + 3600,

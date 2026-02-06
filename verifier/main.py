@@ -1,19 +1,20 @@
-import time
+import json
 import secrets
-from typing import Any, Dict, Optional
+import time
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 import jwt
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-app = FastAPI(title="Tesi SSI - Railway Verifier Simulation", version="0.3.1")
-
-ISSUER_WHITELIST = {"http://127.0.0.1:8000"}
+app = FastAPI(title="Tesi SSI - Railway Verifier Simulation", version="0.4.1")
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-ISSUER_PUBLIC_KEY_PATH = BASE_DIR / "keys" / "issuer_public.pem"
-ISSUER_PUBLIC_KEY = ISSUER_PUBLIC_KEY_PATH.read_text(encoding="utf-8")
+DID_REGISTRY_PATH = BASE_DIR / "did_registry.json"
+DID_REGISTRY: Dict[str, Any] = json.loads(DID_REGISTRY_PATH.read_text(encoding="utf-8"))
+
+ISSUER_WHITELIST = {"did:example:issuer"}
 
 EXPECTED_ISSUER_KID = "issuer-key-1"
 EXPECTED_VC_TYP = "jwt_vc_json"
@@ -27,6 +28,34 @@ challenge_store: Dict[str, Dict[str, Any]] = {}
 
 def now_ts() -> int:
     return int(time.time())
+
+
+def resolve_public_key_pem(did: str, kid: str) -> str:
+    did_entry = DID_REGISTRY.get(did)
+    if not isinstance(did_entry, dict):
+        raise ValueError(f"DID not found: {did}")
+
+    keys = did_entry.get("keys")
+    if not isinstance(keys, dict):
+        raise ValueError(f"No keys for DID: {did}")
+
+    k = keys.get(kid)
+    if not isinstance(k, dict):
+        raise ValueError(f"KID not found for DID {did}: {kid}")
+
+    pem = k.get("publicKeyPem")
+    if isinstance(pem, str) and pem.strip():
+        return pem
+
+    pem_path = k.get("publicKeyPemPath")
+    if not isinstance(pem_path, str) or not pem_path:
+        raise ValueError(f"Missing publicKeyPem/publicKeyPemPath for DID {did} kid {kid}")
+
+    p = (BASE_DIR / pem_path).resolve()
+    if not p.exists():
+        raise ValueError(f"Public key file not found: {p}")
+
+    return p.read_text(encoding="utf-8")
 
 
 class ChallengeRequest(BaseModel):
@@ -73,19 +102,30 @@ def decode_and_verify_vc_rs256(token: str) -> Dict[str, Any]:
         raise ValueError(f"Unexpected typ: {typ}")
 
     kid = header.get("kid")
-    if not kid:
-        raise ValueError("Missing 'kid' in VC JWT header")
+    if not isinstance(kid, str) or not kid:
+        raise ValueError("Missing/invalid 'kid' in VC JWT header")
+
     if kid != EXPECTED_ISSUER_KID:
         raise ValueError(f"Unexpected kid: {kid}")
 
+    payload_no_verify = jwt.decode(token, options={"verify_signature": False, "verify_exp": False, "verify_aud": False})
+    if not isinstance(payload_no_verify, dict):
+        raise ValueError("Invalid VC JWT payload")
+
+    iss = payload_no_verify.get("iss")
+    if not isinstance(iss, str) or not iss:
+        raise ValueError("Missing/invalid 'iss' in VC JWT payload")
+
+    if iss not in ISSUER_WHITELIST:
+        raise ValueError(f"Issuer not allowed: {iss}")
+
+    issuer_public_key = resolve_public_key_pem(iss, kid)
+
     payload = jwt.decode(
         token,
-        ISSUER_PUBLIC_KEY,
+        issuer_public_key,
         algorithms=["RS256"],
-        options={
-            "verify_aud": False,
-            "verify_exp": False,
-        },
+        options={"verify_aud": False, "verify_exp": False},
     )
     return payload
 
@@ -115,9 +155,6 @@ def verify(req: VerifyRequest):
 
     if not isinstance(iss, str) or not iss:
         return VerifyResponse(verified=False, reason="Missing/invalid 'iss' in VC JWT payload")
-
-    if iss not in ISSUER_WHITELIST:
-        return VerifyResponse(verified=False, reason=f"Issuer not allowed: {iss}")
 
     if not isinstance(exp, (int, float)):
         return VerifyResponse(verified=False, reason="Missing/invalid 'exp' in VC JWT payload")
@@ -151,13 +188,10 @@ def verify(req: VerifyRequest):
 
     if not staff_id:
         return VerifyResponse(verified=False, reason="Missing claim: staff_id")
-
     if depot_id != REQUIRED_DEPOT:
         return VerifyResponse(verified=False, reason=f"Wrong depot_id: {depot_id}")
-
     if role not in ALLOWED_ROLES:
         return VerifyResponse(verified=False, reason=f"Role not allowed: {role}")
-
     if training_ok is not True:
         return VerifyResponse(verified=False, reason="Safety training not valid")
 

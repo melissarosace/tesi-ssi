@@ -10,7 +10,10 @@ import jwt
 
 ISSUER_URL = "http://127.0.0.1:8000"
 VERIFIER_URL = "http://127.0.0.1:8001"
-CLIENT_ID = "did:key:holder-melissa-rosace"
+
+ISSUER_DID = "did:example:issuer"
+HOLDER_DID = "did:example:holder-melissa"
+CLIENT_ID = HOLDER_DID
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 HOLDER_PRIVATE_KEY = (BASE_DIR / "keys" / "holder_private.pem").read_text(encoding="utf-8")
@@ -111,9 +114,9 @@ def sign_vc_rs256(vc_payload: dict, *, kid: str = ISSUER_KID, typ: str = "jwt_vc
 
 def build_vc_payload(
     *,
-    holder_did: str = CLIENT_ID,
-    vc_issuer: str = ISSUER_URL,
-    iss_claim: str = ISSUER_URL,
+    holder_did: str = HOLDER_DID,
+    vc_issuer: str = ISSUER_DID,
+    iss_claim: str = ISSUER_DID,
     exp_offset: int = 3600,
     cs_overrides: dict | None = None,
 ) -> dict:
@@ -201,6 +204,8 @@ def obtain_valid_credential():
     c_nonce = t["c_nonce"]
     proof = build_proof(c_nonce)
     r = get_credential(access_token, proof)
+    if r.status_code != 200:
+        show_response(r)
     r.raise_for_status()
     return r.json()["credential"]
 
@@ -249,7 +254,7 @@ def test_issuer_nonce_mismatch():
 
 def test_issuer_iss_mismatch():
     t = get_token()
-    proof = build_proof(t["c_nonce"], iss_override="did:key:holder-falso")
+    proof = build_proof(t["c_nonce"], iss_override="did:example:holder-falso")
     r = get_credential(t["access_token"], proof)
     show_response(r)
 

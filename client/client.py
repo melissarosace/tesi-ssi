@@ -6,7 +6,7 @@ import jwt
 
 ISSUER_URL = "http://127.0.0.1:8000"
 VERIFIER_URL = "http://127.0.0.1:8001"
-CLIENT_ID = "did:key:holder-melissa-rosace"
+CLIENT_ID = "did:example:holder-melissa"
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 HOLDER_PRIVATE_KEY_PATH = BASE_DIR / "keys" / "holder_private.pem"
@@ -16,10 +16,7 @@ HOLDER_KID = "holder-key-1"
 
 
 def sign_proof_rs256(payload: dict) -> str:
-    headers = {
-        "typ": "openid4vci-proof+jwt",
-        "kid": HOLDER_KID,
-    }
+    headers = {"typ": "openid4vci-proof+jwt", "kid": HOLDER_KID}
     return jwt.encode(payload, HOLDER_PRIVATE_KEY, algorithm="RS256", headers=headers)
 
 
@@ -58,19 +55,15 @@ def main():
 
     with open("credential.jwt", "w", encoding="utf-8") as f:
         f.write(credential_jwt)
-    print("Saved credential.jwt")
 
     c = httpx.post(f"{VERIFIER_URL}/challenge", timeout=10)
     c.raise_for_status()
-    challenge = c.json()
-    challenge_nonce = challenge["nonce"]
-    print("CHALLENGE OK:", challenge_nonce[:12] + "...")
+    challenge_nonce = c.json()["nonce"]
 
     verify_req = {"nonce": challenge_nonce, "credential": credential_jwt}
     v = httpx.post(f"{VERIFIER_URL}/verify", json=verify_req, timeout=10)
     v.raise_for_status()
-    verify_resp = v.json()
-    print("VERIFY RESULT:", verify_resp)
+    print("VERIFY RESULT:", v.json())
 
 
 if __name__ == "__main__":

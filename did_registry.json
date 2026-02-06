@@ -1,0 +1,18 @@
+{
+  "did:example:issuer": {
+    "keys": {
+      "issuer-key-1": {
+        "type": "RSA",
+        "publicKeyPemPath": "keys/issuer_public.pem"
+      }
+    }
+  },
+  "did:example:holder-melissa": {
+    "keys": {
+      "holder-key-1": {
+        "type": "RSA",
+        "publicKeyPemPath": "keys/holder_public.pem"
+      }
+    }
+  }
+}
