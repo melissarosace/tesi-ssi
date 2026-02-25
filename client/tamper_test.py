@@ -14,7 +14,6 @@ with open("credential.jwt","r",encoding="utf-8") as f:
 h,p,s = token.split(".")
 payload = json.loads(b64url_decode(p))
 
-# MANOMISSIONE: cambio depot_id
 payload["vc"]["credentialSubject"]["depot_id"] = "DEPOT_ALTRO"
 
 p2 = b64url_encode(json.dumps(payload,separators=(",",":")).encode())
